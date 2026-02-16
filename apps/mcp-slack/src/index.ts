@@ -3,10 +3,11 @@ import express from "express";
 import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
+
 import { WebClient } from "@slack/web-api";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { z } from "zod";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,22 +46,23 @@ server.tool(
   }
 );
 
+// --- Streamable HTTP wiring (what Archestra expects) ---
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
-let transport: any = null;
+const transport = new StreamableHTTPServerTransport({});
+await server.connect(transport);
 
-app.get("/sse", async (req, res) => {
-  transport = new SSEServerTransport("/messages", res);
-  await server.connect(transport);
-});
-
-app.post("/messages", async (req, res) => {
-  if (!transport) return res.status(400).send("No active SSE transport. Call GET /sse first.");
-  await transport.handlePostMessage(req, res);
+// Mount at ROOT
+app.all("/", async (req, res) => {
+  try {
+    await transport.handleRequest(req, res);
+  } catch (e: any) {
+    res.status(500).send(String(e?.message ?? e));
+  }
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true, server: "mcp-slack" }));
 
 const PORT = 7012;
-app.listen(PORT, () => console.log(`mcp-slack SSE MCP running at http://localhost:${PORT}/sse`));
+app.listen(PORT, () => console.log(`mcp-slack streamable HTTP MCP at http://localhost:${PORT}`));

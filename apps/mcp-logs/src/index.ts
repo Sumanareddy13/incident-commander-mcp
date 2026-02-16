@@ -3,9 +3,10 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 type LogLine = { ts: string; service: string; level: string; msg: string };
 
@@ -32,7 +33,6 @@ server.tool(
       .filter((l) => l.service === service)
       .filter((l) => l.msg.toLowerCase().includes(pattern.toLowerCase()))
       .slice(0, 30);
-
     return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
   }
 );
@@ -46,23 +46,28 @@ server.tool(
   })
 );
 
+// --- Streamable HTTP wiring (what Archestra expects) ---
 const app = express();
-app.use(express.json());
 
-let transport: any = null;
+// IMPORTANT: use JSON parsing
+app.use(express.json({ limit: "2mb" }));
 
-// IMPORTANT: Archestra should point to /sse (not /)
-app.get("/sse", async (req, res) => {
-  transport = new SSEServerTransport("/messages", res);
-  await server.connect(transport);
+const transport = new StreamableHTTPServerTransport({
+  // keep default behavior; Archestra will manage session headers
 });
 
-app.post("/messages", async (req, res) => {
-  if (!transport) return res.status(400).send("No active SSE transport. Call GET /sse first.");
-  await transport.handlePostMessage(req, res);
+await server.connect(transport);
+
+// Mount transport at ROOT so Archestra can POST to base URL
+app.all("/", async (req, res) => {
+  try {
+    await transport.handleRequest(req, res);
+  } catch (e: any) {
+    res.status(500).send(String(e?.message ?? e));
+  }
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true, server: "mcp-logs" }));
 
 const PORT = 7011;
-app.listen(PORT, () => console.log(`mcp-logs SSE MCP running at http://localhost:${PORT}/sse`));
+app.listen(PORT, () => console.log(`mcp-logs streamable HTTP MCP at http://localhost:${PORT}`));
